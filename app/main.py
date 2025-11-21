@@ -208,17 +208,19 @@ def ask(req: AskRequest):
             else:
                 logging.warning("No interactions found in memory store")
             
-            # Get the 5 most recent interaction texts (for strong context continuity)
-            # Always prioritize recent interactions to maintain conversation flow
-            recent_docs = [x["doc"] for x in recent_interactions[:5]]
+            # Get ALL recent interaction texts (for comprehensive context continuity)
+            # Include all recent interactions to maintain full conversation history
+            # Only limit if there are too many (performance consideration)
+            MAX_RECENT = 50  # Include up to 50 most recent interactions
+            recent_docs = [x["doc"] for x in recent_interactions[:MAX_RECENT]]
             recent_docs_set = set(recent_docs)  # For deduplication
             
             # Step 2: Also do semantic search for similar memories
-            # Increased n_results to 20 to better find older interactions (50+ interactions ago)
+            # Increased n_results to 30 to better find older interactions (100+ interactions ago)
             semantic_results = []
             semantic_with_distances = []  # Store with similarity scores
             try:
-                res = query_memory(req.question, n_results=20)  # Increased from 15 to 20 for better coverage
+                res = query_memory(req.question, n_results=30)  # Increased from 20 to 30 for better coverage
                 docs = res.get("documents", [])
                 metadatas_sem = res.get("metadatas", [])
                 distances = res.get("distances", [])
@@ -244,23 +246,36 @@ def ask(req: AskRequest):
             except Exception as e:
                 logging.warning(f"Semantic memory query failed: {e}")
             
-            # Step 3: Combine: recent interactions first (up to 5), then best semantic matches (up to 10 total)
-            # Increased total from 5 to 10 to include more context for stronger continuity
-            result = list(recent_docs)  # Start with recent interactions (up to 5)
+            # Step 3: Combine: ALL recent interactions first, then best semantic matches
+            # CRITICAL: Include as many interactions as possible for comprehensive context
+            # This ensures the model has access to the full conversation history
+            result = []
             
-            # Add semantically similar memories (up to 10 total)
-            # This ensures we can find interactions from 50+ interactions ago if they're semantically relevant
-            # while still maintaining strong recent context
+            # ALWAYS include ALL recent interactions (up to MAX_RECENT)
+            # This gives the model access to the complete recent conversation history
+            for doc in recent_docs:
+                if doc and doc.strip() and doc not in result:
+                    result.append(doc)
+            
+            logging.info(f"Including {len(result)} recent interactions in context")
+            
+            # Add semantically similar memories to fill gaps and find relevant older interactions
+            # No hard limit - include all semantically relevant ones that aren't already included
+            # This ensures we can find interactions from 100+ interactions ago if they're relevant
+            MAX_TOTAL = 100  # Maximum total interactions to include (safety limit)
             for sem_doc in semantic_results:
-                if len(result) >= 10:  # Increased from 5 to 10
+                if len(result) >= MAX_TOTAL:  # Safety limit to prevent prompt bloat
+                    logging.warning(f"Reached maximum interaction limit ({MAX_TOTAL}), stopping semantic search")
                     break
-                if sem_doc and sem_doc.strip():
+                if sem_doc and sem_doc.strip() and sem_doc not in result:
                     result.append(sem_doc)
             
             # Debug logging
             logging.info(f"Memory query: Found {len(recent_interactions)} interactions, returning {len(result)} memories")
             if result:
-                logging.info(f"First memory preview: {result[0][:100]}...")
+                logging.info(f"First memory (most recent): {result[0][:150]}...")
+                if len(result) > 1:
+                    logging.info(f"Second memory: {result[1][:150]}...")
             
             return result
         except Exception as e:

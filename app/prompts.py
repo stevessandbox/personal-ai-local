@@ -65,18 +65,47 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
     parts = [system_prompt, "\n\n"]
     if memory_texts:
         parts.append("=== PREVIOUS CONVERSATIONS AND MEMORIES ===\n")
-        parts.append("The following are from previous interactions with the user. CRITICAL: Use this context to maintain conversation continuity and provide relevant, context-aware responses. Reference specific details from these conversations when relevant.\n\n")
-        # Limit memory texts to top 10 and use longer truncation for better context
-        # Recent interactions get more characters, older ones get less
-        for i, m in enumerate(memory_texts[:10], 1):
-            # First 3 (most recent) get 1000 chars, rest get 600 chars
-            truncate_length = 1000 if i <= 3 else 600
+        parts.append("The following are from ALL previous interactions with the user. CRITICAL: Use ALL of this context to maintain conversation continuity and provide relevant, context-aware responses. ")
+        parts.append("You have access to the complete conversation history - use it comprehensively. ")
+        parts.append("When the user asks follow-up questions (like 'what breed is it?' or 'tell me more'), they are referring to topics from the most recent conversation above. ")
+        parts.append("ALWAYS check the most recent interaction first - it contains the immediate context for the current question. ")
+        parts.append("But also reference ANY relevant details from ANY of the interactions below when they relate to the current question. ")
+        parts.append("Reference specific details from these conversations when relevant.\n\n")
+        # Include ALL memory texts with smart truncation based on recency
+        # Recent interactions get more characters, older ones get less to fit more in
+        total_interactions = len(memory_texts)
+        for i, m in enumerate(memory_texts, 1):
+            # Truncation strategy: Most recent get more detail, older ones get less
+            # This allows including many interactions while staying within context limits
+            if i <= 5:
+                # Top 5 most recent: 800 chars each
+                truncate_length = 800
+            elif i <= 15:
+                # Next 10: 500 chars each
+                truncate_length = 500
+            elif i <= 30:
+                # Next 15: 300 chars each
+                truncate_length = 300
+            else:
+                # Older ones: 200 chars each
+                truncate_length = 200
+            
             truncated = m[:truncate_length] + "..." if len(m) > truncate_length else m
-            # Mark recent interactions for clarity
-            label = f"[Recent {i}]" if i <= 5 else f"[Context {i}]"
+            # Mark interactions by recency
+            if i <= 5:
+                label = f"[Recent {i}/{total_interactions}]"
+            elif i <= 15:
+                label = f"[Recent {i}/{total_interactions}]"
+            else:
+                label = f"[Context {i}/{total_interactions}]"
             parts.append(f"{label} {truncated}\n")
         parts.append("\n=== END OF PREVIOUS CONVERSATIONS ===\n")
-        parts.append("IMPORTANT: Maintain conversation continuity. Reference previous topics, maintain personality consistency, and build upon earlier discussions.\n\n")
+        parts.append("IMPORTANT: Maintain conversation continuity across ALL interactions. ")
+        parts.append("You have access to the complete conversation history - use it to provide comprehensive, context-aware responses. ")
+        parts.append("If the user asks a short follow-up question (like 'what breed is it?', 'tell me more', 'what about X?'), ")
+        parts.append("they are almost certainly referring to the MOST RECENT conversation above. ")
+        parts.append("But also consider if ANY earlier interactions are relevant to the current question. ")
+        parts.append("Reference previous topics from ANY interaction, maintain personality consistency, and build upon earlier discussions throughout the entire conversation history.\n\n")
     if search_texts:
         parts.append("Search results (summaries):\n")
         # Limit search texts to top 2 and truncate each to 800 chars
