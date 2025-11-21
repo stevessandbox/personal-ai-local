@@ -11,6 +11,7 @@ export default function AskPanel() {
   const [personality, setPersonality] = useState('');
   const [selectedPersonalityId, setSelectedPersonalityId] = useState<string | null>(null);
   const [response, setResponse] = useState<AskResponse | null>(null);
+  const [images, setImages] = useState<string[]>([]);  // Base64-encoded images
 
   // Fetch available personalities (with error handling to prevent crashes)
   const { data: personalitiesData, refetch: refetchPersonalities } = useQuery(
@@ -86,16 +87,73 @@ export default function AskPanel() {
     }
   };
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    const fileArray = Array.from(files);
+    const MAX_IMAGES = 3;
+    const MAX_SIZE_MB = 10;
+    const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
+
+    // Check total image count
+    if (images.length + fileArray.length > MAX_IMAGES) {
+      alert(`Maximum ${MAX_IMAGES} images allowed. You already have ${images.length} image(s).`);
+      e.target.value = ''; // Reset input
+      return;
+    }
+
+    const newImages: string[] = [];
+    const errors: string[] = [];
+
+    fileArray.forEach((file) => {
+      // Check file type
+      if (!file.type.startsWith('image/')) {
+        errors.push(`${file.name} is not an image file`);
+        return;
+      }
+
+      // Check file size (10MB limit)
+      if (file.size > MAX_SIZE_BYTES) {
+        errors.push(`${file.name} exceeds ${MAX_SIZE_MB}MB limit (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const result = event.target?.result as string;
+        if (result) {
+          newImages.push(result);
+          // When all valid files are processed
+          if (newImages.length + images.length === fileArray.filter(f => f.type.startsWith('image/') && f.size <= MAX_SIZE_BYTES).length) {
+            if (errors.length > 0) {
+              alert(`Some files were skipped:\n${errors.join('\n')}`);
+            }
+            setImages((prev) => [...prev, ...newImages]);
+          }
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = ''; // Reset input after processing
+  };
+
+  const removeImage = (index: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const handleAsk = () => {
-    if (!question.trim()) {
-      alert('Type a question first.');
+    if (!question.trim() && images.length === 0) {
+      alert('Type a question or upload an image first.');
       return;
     }
     askMutation.mutate({
-      question: question.trim(),
+      question: question.trim() || 'What do you see in this image?',
       use_memory: useMemory,
       use_search: useSearch,
       personality: getPersonalityValue(),
+      images: images.length > 0 ? images : undefined,
     });
   };
 
@@ -119,10 +177,50 @@ export default function AskPanel() {
       <textarea
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
-        placeholder="Ask anything..."
+        placeholder="Ask anything... (or upload an image to analyze)"
         rows={3}
         className="w-full p-2 rounded-md border border-white/10 bg-white/5 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3"
       />
+
+      {/* Image Upload Section */}
+      <div className="mb-3">
+        <label className="block text-sm text-gray-300 mb-2">
+          Images (optional) - Max 3 images, 10MB each
+        </label>
+        <input
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={handleImageUpload}
+          disabled={images.length >= 3}
+          className="w-full p-2 rounded-md border border-white/10 bg-white/5 text-white text-sm file:mr-4 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-500 file:text-white hover:file:bg-blue-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+        {images.length >= 3 && (
+          <p className="text-xs text-yellow-400 mt-1">Maximum 3 images reached</p>
+        )}
+        
+        {/* Image Previews */}
+        {images.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {images.map((img, index) => (
+              <div key={index} className="relative inline-block">
+                <img
+                  src={img}
+                  alt={`Upload ${index + 1}`}
+                  className="w-24 h-24 object-cover rounded-md border border-white/10"
+                />
+                <button
+                  onClick={() => removeImage(index)}
+                  className="absolute top-0 right-0 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-600"
+                  title="Remove image"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="mb-3 space-y-2">
         <label className="block text-sm text-gray-300 mb-1">Personality (optional)</label>

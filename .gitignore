@@ -34,6 +34,9 @@ Thumbs.db
 # Chroma DB
 chroma_store/
 
+# Image storage
+image_store/
+
 # Build outputs
 app/static/*.js
 app/static/*.css

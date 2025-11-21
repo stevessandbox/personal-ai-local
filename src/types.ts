@@ -3,6 +3,7 @@ export interface AskRequest {
   use_memory?: boolean;
   use_search?: boolean;
   personality?: string;
+  images?: string[];  // Optional list of base64-encoded images (with data URL prefix)
 }
 
 export interface TavilyInfo {

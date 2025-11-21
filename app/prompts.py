@@ -18,27 +18,45 @@ SYSTEM_BASE = (
     "When in doubt, say 'I do not have that information.'"
 )
 
-def build_prompt(question: str, memory_texts: List[str] = None, search_texts: List[str] = None, personality: str = None) -> str:
+def build_prompt(question: str, memory_texts: List[str] = None, search_texts: List[str] = None, personality: str = None, has_images: bool = False) -> str:
     """
-    Build a prompt with optional personality, memory context, and search results.
+    Build a prompt with optional personality, memory context, search results, and image analysis.
     
     Args:
         question: User's question
         memory_texts: Relevant memory excerpts
         search_texts: Web search result summaries
         personality: Optional personality description (e.g., "goth", "friendly", "professional")
+        has_images: Whether images are being provided for analysis
     """
     # Build system prompt with personality if provided
-    system_prompt = SYSTEM_BASE
-    if personality and personality.strip():
-        personality_desc = personality.strip()
+    if has_images:
+        # Special system prompt for image analysis
         system_prompt = (
-            f"You are a helpful private assistant with a {personality_desc} personality. "
-            f"Respond in a {personality_desc} style while being concise and honest. "
-            "Only reference user memory or web search results if explicit excerpts are included in the prompt. "
-            "If no such excerpts are present, do not imply you accessed memory or the web. "
-            "When in doubt, say 'I do not have that information.'"
+            "You are a helpful assistant with vision capabilities. "
+            "You can see and analyze images. "
+            "When images are provided, carefully examine them and describe what you see. "
+            "Be detailed and accurate in your analysis. "
         )
+        if personality and personality.strip():
+            personality_desc = personality.strip()
+            system_prompt = (
+                f"You are a helpful assistant with a {personality_desc} personality and vision capabilities. "
+                f"Respond in a {personality_desc} style while being detailed and accurate. "
+                "When images are provided, carefully examine them and describe what you see. "
+            )
+    else:
+        # Standard text-only system prompt
+        system_prompt = SYSTEM_BASE
+        if personality and personality.strip():
+            personality_desc = personality.strip()
+            system_prompt = (
+                f"You are a helpful private assistant with a {personality_desc} personality. "
+                f"Respond in a {personality_desc} style while being concise and honest. "
+                "Only reference user memory or web search results if explicit excerpts are included in the prompt. "
+                "If no such excerpts are present, do not imply you accessed memory or the web. "
+                "When in doubt, say 'I do not have that information.'"
+            )
     
     parts = [system_prompt, "\n\n"]
     if memory_texts:
@@ -58,5 +76,13 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
             parts.append(f"{i}. {truncated}\n")
         parts.append("\n")
     parts.append(f"User question: {question}\n")
-    parts.append("Answer succinctly. If you do not have supporting context, explicitly say you do not know.\n")
+    
+    # Add image analysis instruction if images are provided
+    if has_images:
+        parts.append("\nIMPORTANT: Analyze the image(s) provided and answer the user's question based on what you see in the image(s). "
+                   "Describe the contents, objects, text, colors, composition, or any other relevant details. "
+                   "Be specific and detailed in your analysis.\n")
+    else:
+        parts.append("Answer succinctly. If you do not have supporting context, explicitly say you do not know.\n")
+    
     return "\n".join(parts)

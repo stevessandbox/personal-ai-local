@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from .model_client import run_local_model
 from .memory import upsert_memory, query_memory, list_all_memories, delete_memory
 from .search import fetch_best_text, tavily_search
@@ -47,6 +47,13 @@ if os.path.isdir(static_dir):
     # Also serve assets from the static directory (JS/CSS bundles from Vite)
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
+# Image storage directory (for storing uploaded images with timestamps)
+IMAGE_STORAGE_DIR = os.getenv("IMAGE_STORAGE_DIR", "./image_store")
+os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
+
+# Serve stored images
+app.mount("/images", StaticFiles(directory=IMAGE_STORAGE_DIR), name="images")
+
 # Request/Response models
 class AskRequest(BaseModel):
     """Request model for asking questions."""
@@ -54,6 +61,7 @@ class AskRequest(BaseModel):
     use_memory: Optional[bool] = True  # Whether to query memory store
     use_search: Optional[bool] = True   # Whether to use web search
     personality: Optional[str] = None  # Optional personality description (e.g., "goth", "friendly")
+    images: Optional[List[str]] = None  # Optional list of base64-encoded images (with data URL prefix)
 
 class MemoryAddRequest(BaseModel):
     """Request model for adding memories."""
@@ -123,6 +131,12 @@ def ask(req: AskRequest):
     """
     timings = {}
     t0 = time.time()
+    
+    # Validate request - allow empty question if images are provided
+    has_images = req.images is not None and len(req.images) > 0
+    has_question = req.question and req.question.strip()
+    if not has_question and not has_images:
+        raise HTTPException(status_code=400, detail="Question or images required")
     
     # Initialize response structures
     memory_texts = []
@@ -316,24 +330,83 @@ def ask(req: AskRequest):
         logging.info(f"Building prompt with {len(memory_texts)} memory texts")
         for i, mem in enumerate(memory_texts):
             logging.info(f"  Memory {i+1}: {mem[:150]}...")
+    
+    # Check if images are provided for prompt customization
+    has_images = req.images is not None and len(req.images) > 0
+    if has_images:
+        logging.info(f"Building prompt with image analysis instructions for {len(req.images)} image(s)")
+    
     prompt = build_prompt(req.question, memory_texts=memory_texts or None,
-                          search_texts=search_texts or None, personality=req.personality)
+                          search_texts=search_texts or None, personality=req.personality,
+                          has_images=has_images)
     timings["prompt_build"] = time.time() - t_prompt_start
     
-    # Run model inference via Ollama
+    # Run model inference via Ollama (with image support if images provided)
     t_model_start = time.time()
     try:
-        out = run_local_model(prompt)
+        # Pass images to model if provided (for vision model analysis)
+        # Only pass images parameter if images are actually provided and not empty
+        if req.images is not None and len(req.images) > 0:
+            logging.info(f"Running vision model with {len(req.images)} image(s)")
+            out = run_local_model(prompt, images=req.images)
+        else:
+            logging.info("Running text-only model")
+            out = run_local_model(prompt)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Model inference failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Model inference failed: {str(e)}")
     timings["model_run"] = time.time() - t_model_start
     timings["total"] = time.time() - t0
     
+    # Store images to disk if provided (before storing interaction in memory)
+    stored_image_paths = []
+    from datetime import datetime
+    import base64
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if req.images and len(req.images) > 0:
+        try:
+            
+            for i, img_data in enumerate(req.images):
+                try:
+                    # Extract base64 data and determine file extension
+                    if ',' in img_data:
+                        header, data = img_data.split(',', 1)
+                        # Get mime type from header (e.g., "data:image/jpeg;base64")
+                        mime_type = header.split(';')[0].split(':')[1]
+                        ext_map = {
+                            'image/jpeg': 'jpg',
+                            'image/jpg': 'jpg',
+                            'image/png': 'png',
+                            'image/gif': 'gif',
+                            'image/webp': 'webp'
+                        }
+                        ext = ext_map.get(mime_type, 'jpg')
+                    else:
+                        data = img_data
+                        ext = 'jpg'  # Default extension
+                    
+                    # Create filename with timestamp
+                    filename = f"{timestamp}_{i+1}.{ext}"
+                    filepath = os.path.join(IMAGE_STORAGE_DIR, filename)
+                    
+                    # Decode and save image
+                    image_bytes = base64.b64decode(data)
+                    with open(filepath, 'wb') as f:
+                        f.write(image_bytes)
+                    
+                    # Store relative path for serving
+                    stored_image_paths.append(f"/images/{filename}")
+                    logging.info(f"Stored image: {filename} ({len(image_bytes)} bytes)")
+                except Exception as e:
+                    logging.warning(f"Failed to store image {i+1}: {e}")
+        except Exception as e:
+            logging.warning(f"Failed to store images: {e}")
+    
     # Store the interaction (question + answer) in memory for future reference
     # This happens AFTER getting the answer, so it will be available for future questions
+    # Use the same timestamp as image storage for consistency
     try:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         interaction_id = f"interaction_{timestamp}_{hashlib.md5(req.question.encode()).hexdigest()[:8]}"
         
         # Store as a conversation pair: question and answer together
@@ -351,6 +424,11 @@ def ask(req: AskRequest):
         }
         if req.personality:
             metadata["personality"] = req.personality
+        
+        # Add image paths if images were stored
+        if stored_image_paths:
+            metadata["image_count"] = str(len(stored_image_paths))
+            metadata["images"] = ",".join(stored_image_paths)  # Comma-separated list of image paths
         
         upsert_memory(
             interaction_id,
@@ -473,8 +551,10 @@ def debug_prompt(payload: dict):
         except Exception:
             search_texts = []
 
+    # Debug endpoint doesn't support images, so has_images is always False
     prompt = build_prompt(question, memory_texts=memory_texts or None,
-                          search_texts=search_texts or None, personality=personality)
+                          search_texts=search_texts or None, personality=personality,
+                          has_images=False)
     return {"prompt": prompt, "memory_texts": memory_texts, "search_texts": search_texts}
 
 @app.get("/personalities")
