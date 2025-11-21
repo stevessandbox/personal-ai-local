@@ -1,6 +1,16 @@
 # app/prompts.py
+"""
+Prompt building utilities for constructing context-aware prompts.
+
+This module handles:
+- System prompt definition
+- Context assembly from memory and search results
+- Text truncation for performance optimization
+"""
+
 from typing import List
 
+# Base system prompt that defines the assistant's behavior
 SYSTEM_BASE = (
     "You are a helpful private assistant. Be concise and honest. "
     "Only reference user memory or web search results if explicit excerpts are included in the prompt. "

@@ -1,17 +1,28 @@
 # requirements.txt
+# Web framework and server
 fastapi==0.95.2
 uvicorn[standard]==0.23.2
+
+# Environment variable management
 python-dotenv==1.0.0
+
+# Vector database for memory storage
 chromadb==0.4.1
+
+# Embeddings for semantic search
 sentence-transformers>=2.2.2
-playwright==1.44.0
+
+# Web scraping and content extraction
 beautifulsoup4==4.12.2
 readability-lxml==0.8.1
-httpx==0.24.1
-tavily-python==0.1.0
 requests==2.32.5
 
-# Hugging Face / Transformers compatibility stack
+# Hugging Face / Transformers compatibility stack (required by sentence-transformers)
 huggingface-hub>=0.34.0,<1.0
 transformers>=4.34.0
 tokenizers>=0.16.0
+
+# Note: playwright is listed in pyproject.toml but not actively used
+# (we use requests + readability instead for faster performance)
+# Note: tavily-python is not used - we make direct HTTP calls to Tavily API
+# Note: httpx is not used - we use requests instead

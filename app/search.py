@@ -1,18 +1,18 @@
 # app/search.py
 """
-Search utilities using the Tavily API.
+Web search utilities using the Tavily API.
+
 This module provides:
-- tavily_search(query, limit=3): returns list of {title, snippet, link}
-- duckduckgo_search alias kept for compatibility (calls tavily_search)
-- fetch_best_text(url, use_playwright_if_js=True): fetches and extracts the main article text
+- tavily_search(query, limit=3): Search using Tavily API, returns list of {title, snippet, link}
+- duckduckgo_search: Compatibility alias (calls tavily_search)
+- fetch_best_text(url): Fetches and extracts main content from web pages
 
-It calls the Tavily API directly. Configure the API key by setting the environment
-variable TAVILY_API_KEY.
+Configuration:
+- Set TAVILY_API_KEY environment variable for API authentication
+- Default API key is provided but should be replaced with your own
 
-Example payload (POST):
-    { "api_key": "...", "query": "weather in Singapore", "max_results": 3, "search_depth": "basic" }
-
-The API returns JSON with a "results" array. Each result has title, content, url fields.
+The Tavily API returns structured search results with title, content, and URL fields.
+We use readability-lxml and BeautifulSoup to extract clean text from fetched pages.
 """
 
 import os
@@ -34,11 +34,16 @@ HEADERS = {"User-Agent": "personal-ai-local/1.0 (+https://example.local/)"}
 
 
 def _normalize_item(item: Dict[str, Any]) -> Dict[str, str]:
-    """Normalize a Tavily result item into {title, snippet, link}."""
+    """
+    Normalize a Tavily API result item into a consistent format.
+    
+    Tavily API returns items with 'title', 'content', and 'url' fields.
+    This function normalizes them to 'title', 'snippet', and 'link' for consistency.
+    """
     if not isinstance(item, dict):
         return {"title": str(item), "snippet": "", "link": ""}
 
-    # Tavily API returns: title, content, url
+    # Extract fields with fallbacks for different API response formats
     title = item.get("title") or ""
     snippet = item.get("content") or item.get("snippet") or ""
     link = item.get("url") or item.get("link") or ""
@@ -48,9 +53,17 @@ def _normalize_item(item: Dict[str, Any]) -> Dict[str, str]:
 
 def tavily_search(query: str, limit: int = 3, return_metadata: bool = False) -> List[Dict[str, str]]:
     """
-    Run a search by calling the Tavily API directly.
-    Returns normalized list of {title, snippet, link}.
-    If return_metadata is True, returns a dict with 'results' and 'metadata' keys.
+    Run a web search by calling the Tavily API directly.
+    
+    Args:
+        query: Search query string
+        limit: Maximum number of results to return (default: 3)
+        return_metadata: If True, returns dict with 'results' and 'metadata' keys.
+                        Metadata includes API call status, HTTP status, params, etc.
+    
+    Returns:
+        If return_metadata=False: List of normalized result dicts with {title, snippet, link}
+        If return_metadata=True: Dict with 'results' (list) and 'metadata' (dict) keys
     """
     if not TAVILY_API_KEY:
         logger.error("No Tavily API key configured (TAVILY_API_KEY).")
@@ -126,8 +139,13 @@ def tavily_search(query: str, limit: int = 3, return_metadata: bool = False) -> 
         return []
 
 
-# Compatibility alias so the rest of the app doesn't need to change:
+# Compatibility alias - kept for backward compatibility
+# Originally this might have used DuckDuckGo, but now uses Tavily
 def duckduckgo_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
+    """
+    Compatibility alias for tavily_search.
+    Originally named for DuckDuckGo but now uses Tavily API.
+    """
     try:
         return tavily_search(query, limit=limit)
     except Exception as e:
@@ -138,8 +156,16 @@ def duckduckgo_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
 def fetch_best_text(url: str, use_playwright_if_js: bool = False) -> str:
     """
     Fetch a web page and extract the main textual content.
-    - prefer requests + readability + BeautifulSoup.
-    - If a JS-heavy page is required and Playwright is configured, we could extend this path.
+    
+    Uses readability-lxml to extract article content, with BeautifulSoup as fallback.
+    This approach is faster than using Playwright for most content sites.
+    
+    Args:
+        url: URL to fetch
+        use_playwright_if_js: Currently unused, kept for future JS-heavy page support
+    
+    Returns:
+        Extracted text content (truncated to 30k chars max)
     """
     if not url:
         return ""

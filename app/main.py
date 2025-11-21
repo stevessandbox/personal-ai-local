@@ -1,8 +1,13 @@
 # app/main.py
+"""
+Main FastAPI application with routes for:
+- Question answering with optional memory and web search
+- Memory management (add, query, list, delete)
+- Debug prompt building
+"""
 
 import os
 import time
-import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load .env early so all modules that import environment variables see them.
@@ -20,62 +25,93 @@ from .memory import upsert_memory, query_memory, list_all_memories, delete_memor
 from .search import duckduckgo_search, fetch_best_text, tavily_search
 from .prompts import build_prompt
 
+# Initialize FastAPI app
 app = FastAPI(title="Personal AI Local API (with UI)")
 
-# Serve the static UI from app/static
+# Serve the static UI from app/static (React build output)
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    # Also serve assets from the static directory
+    # Also serve assets from the static directory (JS/CSS bundles from Vite)
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
+# Request/Response models
 class AskRequest(BaseModel):
+    """Request model for asking questions."""
     question: str
-    use_memory: Optional[bool] = True
-    use_search: Optional[bool] = True
+    use_memory: Optional[bool] = True  # Whether to query memory store
+    use_search: Optional[bool] = True   # Whether to use web search
 
 class MemoryAddRequest(BaseModel):
+    """Request model for adding memories."""
     key: str
     text: str
     metadata: Optional[dict] = None
 
 @app.get("/")
 def index():
+    """
+    Serve the React UI index page.
+    In production, this serves the built React app from app/static/index.html.
+    """
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path, media_type="text/html")
     return JSONResponse({"error": "UI not found. Make sure app/static/index.html exists."}, status_code=404)
 
 def _fetch_search_result(r: dict) -> str:
-    """Helper to fetch a single search result."""
+    """
+    Helper function to fetch and format a single search result.
+    
+    Optimized for speed:
+    - Uses snippet first (from Tavily API)
+    - Only fetches full page if snippet is too short
+    - Limits fetched text to reduce processing time
+    
+    Args:
+        r: Search result dict with 'snippet', 'link', 'title' keys
+        
+    Returns:
+        Formatted string with title and summary, or None if fetch fails
+    """
     try:
-        # Use snippet first, only fetch if snippet is too short
         snippet = r.get("snippet", "")
         if len(snippet) > 300:
-            # Good snippet, use it with minimal fetch
+            # Good snippet available, use it with minimal additional fetch
             txt = fetch_best_text(r["link"], use_playwright_if_js=False)
             # Only use first 1000 chars from fetched text to save time
             txt_preview = (txt[:1000] if isinstance(txt, str) else "")
             summary = f"{snippet}\n{txt_preview}"
         else:
-            # Short snippet, fetch more but limit to 1500 chars
+            # Short snippet, fetch more content but limit to 1500 chars
             txt = fetch_best_text(r["link"], use_playwright_if_js=False)
             summary = (snippet + "\n" + (txt[:1500] if isinstance(txt, str) else "")).strip()
         
         if summary and summary.strip():
             return f"{r.get('title','')} - {summary}"
     except Exception:
-        # Fallback to just snippet if fetch fails
+        # Fallback to just snippet if page fetch fails
         if snippet:
             return f"{r.get('title','')} - {snippet}"
     return None
 
 @app.post("/ask")
 def ask(req: AskRequest):
+    """
+    Main endpoint for asking questions with optional memory and web search.
+    
+    Performance optimizations:
+    - Memory and search queries run in parallel when both are enabled
+    - Web page fetching is parallelized (3 workers)
+    - Context is truncated to reduce model processing time
+    
+    Returns:
+        JSON with answer, tavily_info, search_texts, memory_texts, and timings
+    """
     timings = {}
     t0 = time.time()
     
-    # Run memory and search in parallel if both are enabled
+    # Initialize response structures
     memory_texts = []
     search_texts = []
     tavily_info = {
@@ -89,11 +125,13 @@ def ask(req: AskRequest):
     }
     
     def fetch_memory():
+        """Fetch relevant memories from vector store."""
         if not req.use_memory:
             return []
         try:
             res = query_memory(req.question, n_results=3)
             docs = res.get("documents", [])
+            # Handle nested list structure from Chroma
             if docs and isinstance(docs[0], list):
                 docs_flat = [d for sub in docs for d in sub]
             else:
@@ -103,10 +141,12 @@ def ask(req: AskRequest):
             return []
     
     def fetch_search():
+        """Fetch web search results from Tavily API."""
         if not req.use_search:
             return [], tavily_info, {}
         try:
             search_timings = {}
+            # Call Tavily API
             t_api_start = time.time()
             search_result = tavily_search(req.question, limit=3, return_metadata=True)
             search_timings["tavily_api"] = time.time() - t_api_start
@@ -114,9 +154,11 @@ def ask(req: AskRequest):
             results = []
             info = tavily_info.copy()
             
+            # Extract results and metadata from Tavily response
             if isinstance(search_result, dict) and "metadata" in search_result:
                 results = search_result.get("results", [])
                 info = search_result.get("metadata", info)
+                # Set status based on success/error
                 if info.get("success"):
                     info["status"] = "success"
                 elif info.get("error"):
@@ -124,13 +166,14 @@ def ask(req: AskRequest):
                 else:
                     info["status"] = "failed"
             else:
+                # Fallback for non-metadata response format
                 results = search_result if isinstance(search_result, list) else []
                 info["called"] = True
                 info["status"] = "success" if results else "failed"
                 info["success"] = bool(results)
                 info["results_count"] = len(results)
             
-            # Parallelize page fetching
+            # Parallelize page fetching for multiple results (performance optimization)
             t_fetch_start = time.time()
             search_texts_list = []
             with ThreadPoolExecutor(max_workers=3) as executor:
@@ -143,13 +186,14 @@ def ask(req: AskRequest):
             
             return search_texts_list, info, search_timings
         except Exception as e:
+            # Return error info if search fails
             info = tavily_info.copy()
             info["called"] = True
             info["status"] = "error"
             info["error"] = str(e)
             return [], info, {}
     
-    # Execute memory and search in parallel
+    # Execute memory and search in parallel if both are enabled (performance optimization)
     if req.use_memory and req.use_search:
         t_parallel_start = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -172,10 +216,13 @@ def ask(req: AskRequest):
         timings.update(search_timings)
         timings["search_total"] = time.time() - t_search_start
 
+    # Build prompt with context from memory and/or search
     t_prompt_start = time.time()
     prompt = build_prompt(req.question, memory_texts=memory_texts if memory_texts else None,
                           search_texts=search_texts if search_texts else None)
     timings["prompt_build"] = time.time() - t_prompt_start
+    
+    # Run model inference via Ollama
     t_model_start = time.time()
     try:
         out = run_local_model(prompt)
@@ -183,6 +230,7 @@ def ask(req: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
     timings["model_run"] = time.time() - t_model_start
     timings["total"] = time.time() - t0
+    
     return {
         "answer": out,
         "tavily_info": tavily_info,
@@ -193,20 +241,24 @@ def ask(req: AskRequest):
 
 @app.post("/memory/add")
 def add_memory(req: MemoryAddRequest):
+    """Add or update a memory entry in the vector store."""
     upsert_memory(req.key, req.text, metadata=req.metadata)
     return {"status": "ok"}
 
 @app.get("/memory/query")
 def memory_query(q: str, n_results: int = 4):
+    """Query the memory store using semantic similarity search."""
     res = query_memory(q, n_results=n_results)
     return res
 
 @app.get("/memory/list")
 def memory_list():
+    """List all memory entries with their IDs, documents, and metadata."""
     return list_all_memories()
 
 @app.post("/memory/delete")
 def memory_delete(req: dict):
+    """Delete a memory entry by its key/ID."""
     key = req.get("key") if isinstance(req, dict) else None
     if not key:
         raise HTTPException(status_code=400, detail="Please provide JSON body {\"key\":\"<id>\"}")
@@ -214,6 +266,10 @@ def memory_delete(req: dict):
 
 @app.post("/debug-prompt")
 def debug_prompt(payload: dict):
+    """
+    Debug endpoint to see the constructed prompt without running the model.
+    Useful for testing and understanding how context is built.
+    """
     question = payload.get("question")
     use_memory = payload.get("use_memory", False)
     use_search = payload.get("use_search", False)

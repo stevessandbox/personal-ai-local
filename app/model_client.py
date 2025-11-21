@@ -1,7 +1,14 @@
 # app/model_client.py
+"""
+Wrapper around Ollama CLI for running local LLM models.
+Uses subprocess to communicate with Ollama, which handles GPU acceleration.
+"""
+
 import os
 import subprocess
 
+# Model name can be overridden via MODEL_NAME environment variable
+# Default is llama3.1, but you can use any model installed in Ollama
 MODEL = os.getenv("MODEL_NAME", "llama3.1")
 
 def run_local_model(prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:

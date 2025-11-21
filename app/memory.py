@@ -1,23 +1,33 @@
 # app/memory.py
+"""
+Vector store for persistent memory using ChromaDB and sentence-transformers.
+
+This module provides:
+- Semantic search over stored memories
+- Persistent storage using ChromaDB
+- Embeddings using a lightweight sentence transformer model
+"""
+
 import os
 from typing import List, Dict, Any
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
 
-# Directory to store the Chroma DB
+# Directory to store the Chroma DB (can be overridden via CHROMA_DIR env var)
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_store")
 
-# Embedding model (small, fast)
+# Embedding model: small and fast, good for semantic search
+# all-MiniLM-L6-v2 is a 384-dimensional model optimized for speed
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Initialize embedder
+# Initialize embedder (loads model on first import)
 embedder = SentenceTransformer(EMBED_MODEL_NAME)
 
-# Modern Chroma client (new architecture)
+# Initialize Chroma client with persistent storage
 client = chromadb.Client(Settings(persist_directory=CHROMA_DIR))
 
-# Ensure collection exists
+# Ensure collection exists (create if it doesn't)
 COLLECTION_NAME = "personal_memory"
 collections = [c.name for c in client.list_collections()]
 if COLLECTION_NAME not in collections:
