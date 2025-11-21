@@ -1,0 +1,16 @@
+[project]
+name = "personal-ai-local"
+version = "0.1.0"
+description = "Local personal AI prototype - FastAPI + Ollama + Chroma + Playwright"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-dotenv",
+    "chromadb",
+    "sentence-transformers",
+    "playwright",
+    "beautifulsoup4",
+    "readability-lxml",
+    "httpx",
+]

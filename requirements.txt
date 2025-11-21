@@ -1,0 +1,17 @@
+# requirements.txt
+fastapi==0.95.2
+uvicorn[standard]==0.23.2
+python-dotenv==1.0.0
+chromadb==0.4.1
+sentence-transformers>=2.2.2
+playwright==1.44.0
+beautifulsoup4==4.12.2
+readability-lxml==0.8.1
+httpx==0.24.1
+tavily-python==0.1.0
+requests==2.32.5
+
+# Hugging Face / Transformers compatibility stack
+huggingface-hub>=0.34.0,<1.0
+transformers>=4.34.0
+tokenizers>=0.16.0

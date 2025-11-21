@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Personal AI — Local</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Personal AI (Local)</h1>
+
+      <section class="panel">
+        <h2>Ask</h2>
+        <textarea
+          id="question"
+          placeholder="Ask anything..."
+          rows="3"
+        ></textarea>
+        <div class="controls">
+          <label
+            ><input id="useMemory" type="checkbox" checked /> Use memory</label
+          >
+          <label><input id="useSearch" type="checkbox" /> Use web search</label>
+          <button id="askBtn">Ask</button>
+          <button id="debugBtn">Show Debug Prompt</button>
+        </div>
+        <div id="answer" class="output">Answer will appear here</div>
+      </section>
+
+      <section class="panel">
+        <h2>Memory</h2>
+        <input id="memKey" placeholder="Key (e.g. note-1)" />
+        <input id="memText" placeholder="Memory text (short)" />
+        <button id="addMemBtn">Add Memory</button>
+        <button id="listMemBtn">List Memories</button>
+        <div id="memList" class="output">No memories listed yet</div>
+      </section>
+
+      <footer>
+        <small>Served locally. Model runs on your machine.</small>
+      </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
