@@ -29,7 +29,9 @@ def run_local_model(prompt: str, max_tokens: int = 256, temperature: float = 0.2
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        encoding='utf-8',
+        errors='replace'  # Replace invalid characters instead of failing
     )
     stdout, stderr = proc.communicate(prompt)
     if proc.returncode != 0:

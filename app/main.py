@@ -9,7 +9,7 @@ Main FastAPI application with routes for:
 import os
 import time
 import hashlib
-from functools import lru_cache
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load .env early so all modules that import environment variables see them.
@@ -53,6 +53,7 @@ class AskRequest(BaseModel):
     question: str
     use_memory: Optional[bool] = True  # Whether to query memory store
     use_search: Optional[bool] = True   # Whether to use web search
+    personality: Optional[str] = None  # Optional personality description (e.g., "goth", "friendly")
 
 class MemoryAddRequest(BaseModel):
     """Request model for adding memories."""
@@ -137,31 +138,99 @@ def ask(req: AskRequest):
     }
     
     def fetch_memory():
-        """Fetch relevant memories from vector store."""
+        """Fetch relevant memories from vector store, including past interactions."""
         if not req.use_memory:
             return []
         try:
-            # Simple cache key based on question hash
-            cache_key = f"mem:{hashlib.md5(req.question.encode()).hexdigest()}"
-            if cache_key in _query_cache:
-                return _query_cache[cache_key]
+            # Strategy: Always include the most recent interaction(s) for context continuity
+            # Then add semantically similar memories
             
-            res = query_memory(req.question, n_results=3)
-            docs = res.get("documents", [])
-            # Handle nested list structure from Chroma
-            if docs and isinstance(docs[0], list):
-                docs_flat = [d for sub in docs for d in sub]
+            # Step 1: Get the most recent interactions directly (by timestamp)
+            all_memories = list_all_memories()
+            ids = all_memories.get("ids", [])
+            documents = all_memories.get("documents", [])
+            metadatas = all_memories.get("metadatas", [])
+            
+            # Filter and sort interactions by timestamp (newest first)
+            recent_interactions = []
+            for i, meta in enumerate(metadatas):
+                if meta and meta.get("type") == "interaction":
+                    doc = documents[i] if i < len(documents) else ""
+                    if doc and doc.strip():
+                        timestamp = meta.get("timestamp", "")
+                        recent_interactions.append({
+                            "doc": doc,
+                            "timestamp": timestamp,
+                            "id": ids[i] if i < len(ids) else None
+                        })
+            
+            # Sort by timestamp (newest first) - timestamp format is YYYYMMDD_HHMMSS
+            # This ensures most recent interactions come first
+            recent_interactions.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            
+            # Debug: Log what interactions we found
+            logging.info(f"Total memories: {len(metadatas)}, Interactions found: {len(recent_interactions)}")
+            if recent_interactions:
+                logging.info(f"Most recent interaction timestamp: {recent_interactions[0].get('timestamp', 'no timestamp')}")
+                logging.info(f"Most recent interaction preview: {recent_interactions[0].get('doc', '')[:100]}...")
             else:
-                docs_flat = docs
-            result = [d for d in docs_flat if d and d.strip()]
+                logging.warning("No interactions found in memory store")
             
-            # Cache result (with size limit)
-            if len(_query_cache) >= _cache_max_size:
-                # Remove oldest entry (simple FIFO)
-                _query_cache.pop(next(iter(_query_cache)))
-            _query_cache[cache_key] = result
+            # Get the 2 most recent interaction texts (for context continuity)
+            recent_docs = [x["doc"] for x in recent_interactions[:2]]
+            recent_docs_set = set(recent_docs)  # For deduplication
+            
+            # Step 2: Also do semantic search for similar memories
+            # Increased n_results to 15 to better find older interactions (50+ interactions ago)
+            semantic_results = []
+            semantic_with_distances = []  # Store with similarity scores
+            try:
+                res = query_memory(req.question, n_results=15)  # Increased from 5 to 15 for better coverage
+                docs = res.get("documents", [])
+                metadatas_sem = res.get("metadatas", [])
+                distances = res.get("distances", [])
+                
+                # Handle nested list structure from Chroma
+                if docs and isinstance(docs[0], list):
+                    docs_flat = [d for sub in docs for d in sub]
+                    distances_flat = [d for sub in distances for d in sub] if distances else []
+                else:
+                    docs_flat = docs
+                    distances_flat = distances if distances else []
+                
+                # Collect semantically similar memories with their similarity scores
+                # Lower distance = higher similarity
+                for i, doc in enumerate(docs_flat):
+                    if doc and doc.strip() and doc not in recent_docs_set:
+                        distance = distances_flat[i] if i < len(distances_flat) else 1.0
+                        semantic_with_distances.append((doc, distance))
+                
+                # Sort by similarity (lower distance = more similar)
+                semantic_with_distances.sort(key=lambda x: x[1])
+                semantic_results = [doc for doc, _ in semantic_with_distances]
+            except Exception as e:
+                logging.warning(f"Semantic memory query failed: {e}")
+            
+            # Step 3: Combine: recent interactions first (up to 2), then best semantic matches (up to 5 total)
+            # Increased total from 3 to 5 to include more context, including older interactions
+            result = list(recent_docs)  # Start with recent interactions (up to 2)
+            
+            # Add semantically similar memories (up to 5 total)
+            # This ensures we can find interactions from 50+ interactions ago if they're semantically relevant
+            for sem_doc in semantic_results:
+                if len(result) >= 5:  # Increased from 3 to 5
+                    break
+                if sem_doc and sem_doc.strip():
+                    result.append(sem_doc)
+            
+            # Debug logging
+            logging.info(f"Memory query: Found {len(recent_interactions)} interactions, returning {len(result)} memories")
+            if result:
+                logging.info(f"First memory preview: {result[0][:100]}...")
+            
             return result
-        except Exception:
+        except Exception as e:
+            logging.error(f"Memory query failed: {e}", exc_info=True)
             return []
     
     def fetch_search():
@@ -240,10 +309,15 @@ def ask(req: AskRequest):
         timings.update(search_timings)
         timings["search_total"] = time.time() - t_search_start
 
-    # Build prompt with context from memory and/or search
+    # Build prompt with context from memory and/or search, and personality
     t_prompt_start = time.time()
+    # Debug: Log what memory texts we're including
+    if memory_texts:
+        logging.info(f"Building prompt with {len(memory_texts)} memory texts")
+        for i, mem in enumerate(memory_texts):
+            logging.info(f"  Memory {i+1}: {mem[:150]}...")
     prompt = build_prompt(req.question, memory_texts=memory_texts or None,
-                          search_texts=search_texts or None)
+                          search_texts=search_texts or None, personality=req.personality)
     timings["prompt_build"] = time.time() - t_prompt_start
     
     # Run model inference via Ollama
@@ -254,6 +328,56 @@ def ask(req: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
     timings["model_run"] = time.time() - t_model_start
     timings["total"] = time.time() - t0
+    
+    # Store the interaction (question + answer) in memory for future reference
+    # This happens AFTER getting the answer, so it will be available for future questions
+    try:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        interaction_id = f"interaction_{timestamp}_{hashlib.md5(req.question.encode()).hexdigest()[:8]}"
+        
+        # Store as a conversation pair: question and answer together
+        # Include both question and answer in the text for better semantic matching
+        interaction_text = f"Q: {req.question}\nA: {out}"
+        
+        # ChromaDB only accepts str, int, or float in metadata - convert booleans to strings
+        metadata = {
+            "type": "interaction",
+            "question": req.question,
+            "answer": out,
+            "timestamp": timestamp,
+            "used_memory": "true" if req.use_memory else "false",
+            "used_search": "true" if req.use_search else "false"
+        }
+        if req.personality:
+            metadata["personality"] = req.personality
+        
+        upsert_memory(
+            interaction_id,
+            interaction_text,
+            metadata=metadata
+        )
+        # Invalidate cache for this question to ensure fresh results next time
+        cache_key = f"mem:{hashlib.md5(req.question.encode()).hexdigest()}"
+        if cache_key in _query_cache:
+            del _query_cache[cache_key]
+        logging.info(f"Stored interaction: {interaction_id[:50]}... | Memory texts found: {len(memory_texts)}")
+    except Exception as e:
+        # Don't fail the request if interaction storage fails
+        logging.error(f"Failed to store interaction: {e}", exc_info=True)
+    
+    # Store personality in memory if provided (for future use in dropdown)
+    if req.personality and req.personality.strip():
+        try:
+            personality_key = f"personality:{hashlib.md5(req.personality.strip().lower().encode()).hexdigest()}"
+            upsert_memory(
+                personality_key,
+                req.personality.strip(),
+                metadata={"type": "personality", "created_from": "interaction"}
+            )
+        except Exception:
+            # Don't fail the request if personality storage fails
+            pass
     
     return {
         "answer": out,
@@ -280,6 +404,31 @@ def memory_list():
     """List all memory entries with their IDs, documents, and metadata."""
     return list_all_memories()
 
+@app.get("/memory/interactions")
+def list_interactions(limit: int = 10):
+    """List recent interactions (for debugging)."""
+    try:
+        all_memories = list_all_memories()
+        ids = all_memories.get("ids", [])
+        documents = all_memories.get("documents", [])
+        metadatas = all_memories.get("metadatas", [])
+        
+        # Filter for interactions only
+        interactions = []
+        for i, meta in enumerate(metadatas):
+            if meta and meta.get("type") == "interaction":
+                interactions.append({
+                    "id": ids[i] if i < len(ids) else None,
+                    "document": documents[i] if i < len(documents) else None,
+                    "metadata": meta
+                })
+        
+        # Sort by timestamp (newest first) and limit
+        interactions.sort(key=lambda x: x.get("metadata", {}).get("timestamp", ""), reverse=True)
+        return {"interactions": interactions[:limit], "total": len(interactions)}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/memory/delete")
 def memory_delete(req: dict):
     """Delete a memory entry by its key/ID."""
@@ -297,6 +446,7 @@ def debug_prompt(payload: dict):
     question = payload.get("question")
     use_memory = payload.get("use_memory", False)
     use_search = payload.get("use_search", False)
+    personality = payload.get("personality")
     memory_texts = []
     if use_memory:
         try:
@@ -324,5 +474,35 @@ def debug_prompt(payload: dict):
             search_texts = []
 
     prompt = build_prompt(question, memory_texts=memory_texts or None,
-                          search_texts=search_texts or None)
+                          search_texts=search_texts or None, personality=personality)
     return {"prompt": prompt, "memory_texts": memory_texts, "search_texts": search_texts}
+
+@app.get("/personalities")
+def list_personalities():
+    """
+    Endpoint to list all stored personalities.
+    Returns all memories with metadata type 'personality'.
+    """
+    all_memories = list_all_memories()
+    personalities = []
+    ids = all_memories.get("ids", [])
+    docs = all_memories.get("documents", [])
+    metas = all_memories.get("metadatas", [])
+    
+    # Extract unique personalities (deduplicate by text content)
+    seen = set()
+    for i, meta in enumerate(metas):
+        if meta and meta.get("type") == "personality":
+            personality_text = docs[i] if i < len(docs) else ""
+            # Use lowercase for deduplication
+            key = personality_text.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                personalities.append({
+                    "id": ids[i] if i < len(ids) else f"personality_{i}",
+                    "text": personality_text
+                })
+    
+    # Sort by text for consistent ordering
+    personalities.sort(key=lambda x: x["text"].lower())
+    return {"personalities": personalities}

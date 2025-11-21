@@ -2,6 +2,7 @@ export interface AskRequest {
   question: string;
   use_memory?: boolean;
   use_search?: boolean;
+  personality?: string;
 }
 
 export interface TavilyInfo {
@@ -37,5 +38,14 @@ export interface MemoryListResponse {
   ids: string[];
   documents: string[];
   metadatas: Record<string, any>[];
+}
+
+export interface Personality {
+  id: string;
+  text: string;
+}
+
+export interface PersonalitiesResponse {
+  personalities: Personality[];
 }
 
