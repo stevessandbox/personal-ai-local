@@ -19,6 +19,8 @@ import os
 import logging
 from typing import List, Dict, Any
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from readability import Document
 from bs4 import BeautifulSoup
 
@@ -31,6 +33,22 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "tvly-dev-elu768TLVoa14oXyD2DOgdS2U
 # Helpful timeout and headers
 REQUEST_TIMEOUT = 15
 HEADERS = {"User-Agent": "personal-ai-local/1.0 (+https://example.local/)"}
+
+# Create a session with connection pooling and retry strategy (efficiency improvement)
+# This reuses TCP connections instead of creating new ones for each request
+session = requests.Session()
+session.headers.update(HEADERS)
+
+# Configure retry strategy for transient failures
+retry_strategy = Retry(
+    total=2,  # Maximum 2 retries
+    backoff_factor=0.3,  # Wait 0.3s, 0.6s between retries
+    status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+    allowed_methods=["GET", "POST"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
 
 
 def _normalize_item(item: Dict[str, Any]) -> Dict[str, str]:
@@ -95,7 +113,8 @@ def tavily_search(query: str, limit: int = 3, return_metadata: bool = False) -> 
     }
 
     try:
-        resp = requests.post(TAVILY_API_URL, headers=HEADERS, json=payload, timeout=REQUEST_TIMEOUT)
+        # Use session for connection reuse (efficiency improvement)
+        resp = session.post(TAVILY_API_URL, json=payload, timeout=REQUEST_TIMEOUT)
         metadata["http_status"] = resp.status_code
         
         if resp.status_code != 200:
@@ -139,21 +158,7 @@ def tavily_search(query: str, limit: int = 3, return_metadata: bool = False) -> 
         return []
 
 
-# Compatibility alias - kept for backward compatibility
-# Originally this might have used DuckDuckGo, but now uses Tavily
-def duckduckgo_search(query: str, limit: int = 3) -> List[Dict[str, str]]:
-    """
-    Compatibility alias for tavily_search.
-    Originally named for DuckDuckGo but now uses Tavily API.
-    """
-    try:
-        return tavily_search(query, limit=limit)
-    except Exception as e:
-        logger.exception("Search alias failed: %s", e)
-        return []
-
-
-def fetch_best_text(url: str, use_playwright_if_js: bool = False) -> str:
+def fetch_best_text(url: str) -> str:
     """
     Fetch a web page and extract the main textual content.
     
@@ -162,7 +167,6 @@ def fetch_best_text(url: str, use_playwright_if_js: bool = False) -> str:
     
     Args:
         url: URL to fetch
-        use_playwright_if_js: Currently unused, kept for future JS-heavy page support
     
     Returns:
         Extracted text content (truncated to 30k chars max)
@@ -171,7 +175,8 @@ def fetch_best_text(url: str, use_playwright_if_js: bool = False) -> str:
         return ""
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        # Use session for connection reuse (efficiency improvement)
+        resp = session.get(url, timeout=10)
         if resp.status_code != 200:
             logger.warning("fetch_best_text: non-200 status %s for url %s", resp.status_code, url)
             return ""

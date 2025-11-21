@@ -27,13 +27,14 @@ embedder = SentenceTransformer(EMBED_MODEL_NAME)
 # Initialize Chroma client with persistent storage
 client = chromadb.Client(Settings(persist_directory=CHROMA_DIR))
 
-# Ensure collection exists (create if it doesn't)
+# Ensure collection exists (create if it doesn't) and cache the reference
 COLLECTION_NAME = "personal_memory"
 collections = [c.name for c in client.list_collections()]
 if COLLECTION_NAME not in collections:
     collection = client.create_collection(name=COLLECTION_NAME)
 else:
     collection = client.get_collection(COLLECTION_NAME)
+# Cache collection reference to avoid repeated get_collection() calls (efficiency improvement)
 
 
 def embed_texts(texts: List[str]):
@@ -47,11 +48,11 @@ def upsert_memory(key: str, text: str, metadata: Dict[str, Any] = None):
     Fix: Only pass metadatas to Chroma if metadata is a non-empty dict.
     """
     vecs = embed_texts([text])
-    col = client.get_collection(COLLECTION_NAME)
+    # Use cached collection reference (efficiency improvement)
 
     # Only include metadata if actually provided and non-empty
     if metadata and isinstance(metadata, dict) and len(metadata.keys()) > 0:
-        col.upsert(
+        collection.upsert(
             ids=[key],
             documents=[text],
             metadatas=[metadata],
@@ -59,7 +60,7 @@ def upsert_memory(key: str, text: str, metadata: Dict[str, Any] = None):
         )
     else:
         # Do NOT send an empty dict to Chroma → it will throw a ValueError
-        col.upsert(
+        collection.upsert(
             ids=[key],
             documents=[text],
             embeddings=vecs.tolist()
@@ -69,7 +70,8 @@ def upsert_memory(key: str, text: str, metadata: Dict[str, Any] = None):
 def query_memory(query: str, n_results: int = 4):
     """Query the memory store using similarity search."""
     qvec = embed_texts([query])[0].tolist()
-    results = client.get_collection(COLLECTION_NAME).query(
+    # Use cached collection reference (efficiency improvement)
+    results = collection.query(
         query_embeddings=[qvec],
         n_results=n_results,
         include=["documents", "metadatas", "distances"]
@@ -84,10 +86,10 @@ def list_all_memories():
     We request documents+metadatas (and embeddings to be safe) and then return ids
     if present in the response.
     """
-    col = client.get_collection(COLLECTION_NAME)
+    # Use cached collection reference (efficiency improvement)
     try:
         # Request the valid include keys. Embeddings are optional but harmless for small stores.
-        rows = col.get(include=["documents", "metadatas", "embeddings"])
+        rows = collection.get(include=["documents", "metadatas", "embeddings"])
         # Chroma typically returns 'ids' alongside these fields; fallback to empty list if missing.
         return {
             "ids": rows.get("ids", []),
@@ -100,6 +102,6 @@ def list_all_memories():
 
 def delete_memory(key: str):
     """Delete a memory entry by its ID."""
-    col = client.get_collection(COLLECTION_NAME)
-    col.delete(ids=[key])
+    # Use cached collection reference (efficiency improvement)
+    collection.delete(ids=[key])
     return {"deleted": key}

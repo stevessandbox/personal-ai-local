@@ -8,6 +8,8 @@ Main FastAPI application with routes for:
 
 import os
 import time
+import hashlib
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load .env early so all modules that import environment variables see them.
@@ -15,18 +17,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 from .model_client import run_local_model
 from .memory import upsert_memory, query_memory, list_all_memories, delete_memory
-from .search import duckduckgo_search, fetch_best_text, tavily_search
+from .search import fetch_best_text, tavily_search
 from .prompts import build_prompt
+
+# Simple in-memory cache for query results (efficiency improvement)
+# Cache size limited to prevent memory issues
+_query_cache = {}
+_cache_max_size = 100  # Maximum number of cached queries
 
 # Initialize FastAPI app
 app = FastAPI(title="Personal AI Local API (with UI)")
+
+# Add response compression middleware (efficiency improvement)
+# Compresses responses > 1000 bytes to reduce bandwidth
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Serve the static UI from app/static (React build output)
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -78,13 +90,13 @@ def _fetch_search_result(r: dict) -> str:
         snippet = r.get("snippet", "")
         if len(snippet) > 300:
             # Good snippet available, use it with minimal additional fetch
-            txt = fetch_best_text(r["link"], use_playwright_if_js=False)
+            txt = fetch_best_text(r["link"])
             # Only use first 1000 chars from fetched text to save time
             txt_preview = (txt[:1000] if isinstance(txt, str) else "")
             summary = f"{snippet}\n{txt_preview}"
         else:
             # Short snippet, fetch more content but limit to 1500 chars
-            txt = fetch_best_text(r["link"], use_playwright_if_js=False)
+            txt = fetch_best_text(r["link"])
             summary = (snippet + "\n" + (txt[:1500] if isinstance(txt, str) else "")).strip()
         
         if summary and summary.strip():
@@ -129,6 +141,11 @@ def ask(req: AskRequest):
         if not req.use_memory:
             return []
         try:
+            # Simple cache key based on question hash
+            cache_key = f"mem:{hashlib.md5(req.question.encode()).hexdigest()}"
+            if cache_key in _query_cache:
+                return _query_cache[cache_key]
+            
             res = query_memory(req.question, n_results=3)
             docs = res.get("documents", [])
             # Handle nested list structure from Chroma
@@ -136,7 +153,14 @@ def ask(req: AskRequest):
                 docs_flat = [d for sub in docs for d in sub]
             else:
                 docs_flat = docs
-            return [d for d in docs_flat if d and d.strip()]
+            result = [d for d in docs_flat if d and d.strip()]
+            
+            # Cache result (with size limit)
+            if len(_query_cache) >= _cache_max_size:
+                # Remove oldest entry (simple FIFO)
+                _query_cache.pop(next(iter(_query_cache)))
+            _query_cache[cache_key] = result
+            return result
         except Exception:
             return []
     
@@ -218,8 +242,8 @@ def ask(req: AskRequest):
 
     # Build prompt with context from memory and/or search
     t_prompt_start = time.time()
-    prompt = build_prompt(req.question, memory_texts=memory_texts if memory_texts else None,
-                          search_texts=search_texts if search_texts else None)
+    prompt = build_prompt(req.question, memory_texts=memory_texts or None,
+                          search_texts=search_texts or None)
     timings["prompt_build"] = time.time() - t_prompt_start
     
     # Run model inference via Ollama
@@ -289,15 +313,16 @@ def debug_prompt(payload: dict):
     search_texts = []
     if use_search:
         try:
-            results = duckduckgo_search(question, limit=3)
-            for r in results:
-                txt = fetch_best_text(r["link"], use_playwright_if_js=False)
+            # Use tavily_search directly (same as main /ask endpoint)
+            search_result = tavily_search(question, limit=3, return_metadata=False)
+            for r in search_result:
+                txt = fetch_best_text(r["link"])
                 summary = (r.get("snippet") or "") + "\n" + (txt[:2000] if isinstance(txt, str) else "")
                 if summary and summary.strip():
                     search_texts.append(f"{r.get('title','')} - {summary}")
         except Exception:
             search_texts = []
 
-    prompt = build_prompt(question, memory_texts=memory_texts if memory_texts else None,
-                          search_texts=search_texts if search_texts else None)
+    prompt = build_prompt(question, memory_texts=memory_texts or None,
+                          search_texts=search_texts or None)
     return {"prompt": prompt, "memory_texts": memory_texts, "search_texts": search_texts}
