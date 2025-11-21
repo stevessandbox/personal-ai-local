@@ -12,13 +12,17 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
     parts = [SYSTEM_BASE, "\n\n"]
     if memory_texts:
         parts.append("User memory (relevant excerpts):\n")
-        for i, m in enumerate(memory_texts, 1):
-            parts.append(f"{i}. {m}\n")
+        # Limit memory texts to top 2 and truncate each to 500 chars
+        for i, m in enumerate(memory_texts[:2], 1):
+            truncated = m[:500] + "..." if len(m) > 500 else m
+            parts.append(f"{i}. {truncated}\n")
         parts.append("\n")
     if search_texts:
         parts.append("Search results (summaries):\n")
-        for i, s in enumerate(search_texts, 1):
-            parts.append(f"{i}. {s}\n")
+        # Limit search texts to top 2 and truncate each to 800 chars
+        for i, s in enumerate(search_texts[:2], 1):
+            truncated = s[:800] + "..." if len(s) > 800 else s
+            parts.append(f"{i}. {truncated}\n")
         parts.append("\n")
     parts.append(f"User question: {question}\n")
     parts.append("Answer succinctly. If you do not have supporting context, explicitly say you do not know.\n")

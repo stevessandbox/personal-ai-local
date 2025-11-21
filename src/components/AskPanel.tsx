@@ -6,8 +6,8 @@ import type { AskResponse } from '../types';
 
 export default function AskPanel() {
   const [question, setQuestion] = useState('');
-  const [useMemory, setUseMemory] = useState(true);
-  const [useSearch, setUseSearch] = useState(false);
+  const [useMemory, setUseMemory] = useState(false);
+  const [useSearch, setUseSearch] = useState(true);
   const [response, setResponse] = useState<AskResponse | null>(null);
 
   const askMutation = useMutation(askQuestion, {

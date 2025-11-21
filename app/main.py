@@ -2,6 +2,8 @@
 
 import os
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load .env early so all modules that import environment variables see them.
 # This ensures TAVILY_API_KEY and other vars are available when other modules import.
@@ -44,25 +46,37 @@ def index():
         return FileResponse(index_path, media_type="text/html")
     return JSONResponse({"error": "UI not found. Make sure app/static/index.html exists."}, status_code=404)
 
+def _fetch_search_result(r: dict) -> str:
+    """Helper to fetch a single search result."""
+    try:
+        # Use snippet first, only fetch if snippet is too short
+        snippet = r.get("snippet", "")
+        if len(snippet) > 300:
+            # Good snippet, use it with minimal fetch
+            txt = fetch_best_text(r["link"], use_playwright_if_js=False)
+            # Only use first 1000 chars from fetched text to save time
+            txt_preview = (txt[:1000] if isinstance(txt, str) else "")
+            summary = f"{snippet}\n{txt_preview}"
+        else:
+            # Short snippet, fetch more but limit to 1500 chars
+            txt = fetch_best_text(r["link"], use_playwright_if_js=False)
+            summary = (snippet + "\n" + (txt[:1500] if isinstance(txt, str) else "")).strip()
+        
+        if summary and summary.strip():
+            return f"{r.get('title','')} - {summary}"
+    except Exception:
+        # Fallback to just snippet if fetch fails
+        if snippet:
+            return f"{r.get('title','')} - {snippet}"
+    return None
+
 @app.post("/ask")
 def ask(req: AskRequest):
     timings = {}
     t0 = time.time()
+    
+    # Run memory and search in parallel if both are enabled
     memory_texts = []
-    if req.use_memory:
-        t_mem_start = time.time()
-        try:
-            res = query_memory(req.question, n_results=3)
-            docs = res.get("documents", [])
-            if docs and isinstance(docs[0], list):
-                docs_flat = [d for sub in docs for d in sub]
-            else:
-                docs_flat = docs
-            memory_texts = [d for d in docs_flat if d and d.strip()]
-        except Exception:
-            memory_texts = []
-        timings["memory_query"] = time.time() - t_mem_start
-
     search_texts = []
     tavily_info = {
         "called": False,
@@ -73,45 +87,90 @@ def ask(req: AskRequest):
         "results_count": 0,
         "error": None
     }
-    t_search_start = time.time()
-    if req.use_search:
+    
+    def fetch_memory():
+        if not req.use_memory:
+            return []
         try:
-            # Use tavily_search with metadata tracking
+            res = query_memory(req.question, n_results=3)
+            docs = res.get("documents", [])
+            if docs and isinstance(docs[0], list):
+                docs_flat = [d for sub in docs for d in sub]
+            else:
+                docs_flat = docs
+            return [d for d in docs_flat if d and d.strip()]
+        except Exception:
+            return []
+    
+    def fetch_search():
+        if not req.use_search:
+            return [], tavily_info, {}
+        try:
+            search_timings = {}
             t_api_start = time.time()
             search_result = tavily_search(req.question, limit=3, return_metadata=True)
-            timings["tavily_api"] = time.time() - t_api_start
+            search_timings["tavily_api"] = time.time() - t_api_start
+            
+            results = []
+            info = tavily_info.copy()
             
             if isinstance(search_result, dict) and "metadata" in search_result:
                 results = search_result.get("results", [])
-                tavily_info = search_result.get("metadata", tavily_info)
-                # Ensure status is set based on success
-                if tavily_info.get("success"):
-                    tavily_info["status"] = "success"
-                elif tavily_info.get("error"):
-                    tavily_info["status"] = "error"
+                info = search_result.get("metadata", info)
+                if info.get("success"):
+                    info["status"] = "success"
+                elif info.get("error"):
+                    info["status"] = "error"
                 else:
-                    tavily_info["status"] = "failed"
+                    info["status"] = "failed"
             else:
-                # Fallback if return_metadata wasn't used
                 results = search_result if isinstance(search_result, list) else []
-                tavily_info["called"] = True
-                tavily_info["status"] = "success" if results else "failed"
-                tavily_info["success"] = bool(results)
-                tavily_info["results_count"] = len(results)
+                info["called"] = True
+                info["status"] = "success" if results else "failed"
+                info["success"] = bool(results)
+                info["results_count"] = len(results)
             
+            # Parallelize page fetching
             t_fetch_start = time.time()
-            for r in results:
-                txt = fetch_best_text(r["link"], use_playwright_if_js=False)
-                summary = (r.get("snippet") or "") + "\n" + (txt[:2000] if isinstance(txt, str) else "")
-                if summary and summary.strip():
-                    search_texts.append(f"{r.get('title','')} - {summary}")
-            timings["fetch_best_text_total"] = time.time() - t_fetch_start
+            search_texts_list = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(_fetch_search_result, r) for r in results]
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        search_texts_list.append(result)
+            search_timings["fetch_best_text_total"] = time.time() - t_fetch_start
+            
+            return search_texts_list, info, search_timings
         except Exception as e:
-            tavily_info["called"] = True
-            tavily_info["status"] = "error"
-            tavily_info["error"] = str(e)
-            search_texts = []
-    timings["search_total"] = time.time() - t_search_start
+            info = tavily_info.copy()
+            info["called"] = True
+            info["status"] = "error"
+            info["error"] = str(e)
+            return [], info, {}
+    
+    # Execute memory and search in parallel
+    if req.use_memory and req.use_search:
+        t_parallel_start = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            mem_future = executor.submit(fetch_memory)
+            search_future = executor.submit(fetch_search)
+            memory_texts = mem_future.result()
+            search_texts, tavily_info, search_timings = search_future.result()
+        timings["parallel_fetch"] = time.time() - t_parallel_start
+        timings.update(search_timings)
+        if req.use_memory:
+            timings["memory_query"] = timings.get("parallel_fetch", 0)
+        timings["search_total"] = timings.get("parallel_fetch", 0)
+    elif req.use_memory:
+        t_mem_start = time.time()
+        memory_texts = fetch_memory()
+        timings["memory_query"] = time.time() - t_mem_start
+    elif req.use_search:
+        t_search_start = time.time()
+        search_texts, tavily_info, search_timings = fetch_search()
+        timings.update(search_timings)
+        timings["search_total"] = time.time() - t_search_start
 
     t_prompt_start = time.time()
     prompt = build_prompt(req.question, memory_texts=memory_texts if memory_texts else None,

@@ -4,11 +4,18 @@ import subprocess
 
 MODEL = os.getenv("MODEL_NAME", "llama3.1")
 
-def run_local_model(prompt: str, max_tokens: int = 512, temperature: float = 0.2) -> str:
+def run_local_model(prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:
     """
     Run the local model using Ollama CLI by sending the prompt via STDIN.
+    Reduced max_tokens default to 256 for faster responses.
     This approach is compatible across Ollama versions.
     """
+    # Truncate prompt if too long to speed up processing
+    # Most models work well with ~2000-3000 tokens of context
+    max_prompt_length = 3000
+    if len(prompt) > max_prompt_length:
+        prompt = prompt[:max_prompt_length] + "\n[Context truncated for speed]"
+    
     cmd = ["ollama", "run", MODEL]
     proc = subprocess.Popen(
         cmd,
