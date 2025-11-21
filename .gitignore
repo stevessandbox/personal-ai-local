@@ -37,6 +37,9 @@ chroma_store/
 # Image storage
 image_store/
 
+# File storage
+file_store/
+
 # Build outputs
 app/static/*.js
 app/static/*.css

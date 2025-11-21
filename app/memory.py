@@ -12,7 +12,6 @@ import os
 from typing import List, Dict, Any
 from sentence_transformers import SentenceTransformer
 import chromadb
-from chromadb.config import Settings
 
 # Directory to store the Chroma DB (can be overridden via CHROMA_DIR env var)
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_store")
@@ -25,7 +24,8 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 embedder = SentenceTransformer(EMBED_MODEL_NAME)
 
 # Initialize Chroma client with persistent storage
-client = chromadb.Client(Settings(persist_directory=CHROMA_DIR))
+# Use PersistentClient instead of Client for actual persistence
+client = chromadb.PersistentClient(path=CHROMA_DIR)
 
 # Ensure collection exists (create if it doesn't) and cache the reference
 COLLECTION_NAME = "personal_memory"

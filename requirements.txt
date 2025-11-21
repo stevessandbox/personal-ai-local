@@ -22,6 +22,11 @@ huggingface-hub>=0.34.0,<1.0
 transformers>=4.34.0
 tokenizers>=0.16.0
 
+# File parsing libraries for document support
+python-docx==1.1.0  # Microsoft Word (.docx) files
+openpyxl==3.1.2     # Excel (.xlsx) files
+PyPDF2==3.0.1       # PDF files
+
 # Note: playwright is listed in pyproject.toml but not actively used
 # (we use requests + readability instead for faster performance)
 # Note: tavily-python is not used - we make direct HTTP calls to Tavily API

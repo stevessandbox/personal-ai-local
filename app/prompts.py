@@ -18,9 +18,9 @@ SYSTEM_BASE = (
     "When in doubt, say 'I do not have that information.'"
 )
 
-def build_prompt(question: str, memory_texts: List[str] = None, search_texts: List[str] = None, personality: str = None, has_images: bool = False) -> str:
+def build_prompt(question: str, memory_texts: List[str] = None, search_texts: List[str] = None, personality: str = None, has_images: bool = False, file_contents: List[str] = None) -> str:
     """
-    Build a prompt with optional personality, memory context, search results, and image analysis.
+    Build a prompt with optional personality, memory context, search results, image analysis, and file content.
     
     Args:
         question: User's question
@@ -28,22 +28,26 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
         search_texts: Web search result summaries
         personality: Optional personality description (e.g., "goth", "friendly", "professional")
         has_images: Whether images are being provided for analysis
+        file_contents: List of extracted text content from uploaded files
     """
     # Build system prompt with personality if provided
     if has_images:
         # Special system prompt for image analysis
-        system_prompt = (
-            "You are a helpful assistant with vision capabilities. "
-            "You can see and analyze images. "
-            "When images are provided, carefully examine them and describe what you see. "
-            "Be detailed and accurate in your analysis. "
-        )
         if personality and personality.strip():
             personality_desc = personality.strip()
             system_prompt = (
-                f"You are a helpful assistant with a {personality_desc} personality and vision capabilities. "
-                f"Respond in a {personality_desc} style while being detailed and accurate. "
+                f"You are a helpful assistant with a STRONG {personality_desc} personality and vision capabilities. "
+                f"Your {personality_desc} personality is ESSENTIAL and must be evident in EVERY response, especially when analyzing images. "
+                f"Respond in a {personality_desc} style while being detailed and accurate in your image analysis. "
+                f"When images are provided, carefully examine them and describe what you see, but ALWAYS do so through the lens of your {personality_desc} personality. "
+                f"Your personality is not optional - it defines how you communicate. Every word you write should reflect your {personality_desc} nature. "
+            )
+        else:
+            system_prompt = (
+                "You are a helpful assistant with vision capabilities. "
+                "You can see and analyze images. "
                 "When images are provided, carefully examine them and describe what you see. "
+                "Be detailed and accurate in your analysis. "
             )
     else:
         # Standard text-only system prompt
@@ -61,13 +65,18 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
     parts = [system_prompt, "\n\n"]
     if memory_texts:
         parts.append("=== PREVIOUS CONVERSATIONS AND MEMORIES ===\n")
-        parts.append("The following are from previous interactions with the user. Use this information to answer their questions.\n\n")
-        # Limit memory texts to top 5 (increased from 2) and truncate each to 500 chars
-        # This allows including older interactions that are semantically relevant
-        for i, m in enumerate(memory_texts[:5], 1):  # Increased from 2 to 5
-            truncated = m[:500] + "..." if len(m) > 500 else m
-            parts.append(f"{i}. {truncated}\n")
-        parts.append("\n=== END OF PREVIOUS CONVERSATIONS ===\n\n")
+        parts.append("The following are from previous interactions with the user. CRITICAL: Use this context to maintain conversation continuity and provide relevant, context-aware responses. Reference specific details from these conversations when relevant.\n\n")
+        # Limit memory texts to top 10 and use longer truncation for better context
+        # Recent interactions get more characters, older ones get less
+        for i, m in enumerate(memory_texts[:10], 1):
+            # First 3 (most recent) get 1000 chars, rest get 600 chars
+            truncate_length = 1000 if i <= 3 else 600
+            truncated = m[:truncate_length] + "..." if len(m) > truncate_length else m
+            # Mark recent interactions for clarity
+            label = f"[Recent {i}]" if i <= 5 else f"[Context {i}]"
+            parts.append(f"{label} {truncated}\n")
+        parts.append("\n=== END OF PREVIOUS CONVERSATIONS ===\n")
+        parts.append("IMPORTANT: Maintain conversation continuity. Reference previous topics, maintain personality consistency, and build upon earlier discussions.\n\n")
     if search_texts:
         parts.append("Search results (summaries):\n")
         # Limit search texts to top 2 and truncate each to 800 chars
@@ -75,13 +84,31 @@ def build_prompt(question: str, memory_texts: List[str] = None, search_texts: Li
             truncated = s[:800] + "..." if len(s) > 800 else s
             parts.append(f"{i}. {truncated}\n")
         parts.append("\n")
+    # Add file contents if provided
+    if file_contents and len(file_contents) > 0:
+        parts.append("=== UPLOADED FILES ===\n")
+        parts.append("The following content is from files uploaded by the user. Use this information to answer their questions.\n\n")
+        for i, content in enumerate(file_contents, 1):
+            # Truncate very long files to prevent prompt bloat (keep first 5000 chars)
+            truncated = content[:5000] + "\n[File content truncated...]" if len(content) > 5000 else content
+            parts.append(f"File {i} content:\n{truncated}\n\n")
+        parts.append("=== END OF UPLOADED FILES ===\n\n")
+    
     parts.append(f"User question: {question}\n")
     
     # Add image analysis instruction if images are provided
     if has_images:
-        parts.append("\nIMPORTANT: Analyze the image(s) provided and answer the user's question based on what you see in the image(s). "
-                   "Describe the contents, objects, text, colors, composition, or any other relevant details. "
-                   "Be specific and detailed in your analysis.\n")
+        if personality and personality.strip():
+            personality_desc = personality.strip()
+            parts.append(f"\nIMPORTANT: Analyze the image(s) provided and answer the user's question based on what you see in the image(s). "
+                       f"CRITICAL: You MUST respond with a {personality_desc} personality and style. "
+                       f"Describe the contents, objects, text, colors, composition, or any other relevant details, but do so in a {personality_desc} manner. "
+                       f"Your entire response should reflect your {personality_desc} personality - this is not optional. "
+                       f"Be specific and detailed in your analysis while maintaining your {personality_desc} personality throughout.\n")
+        else:
+            parts.append("\nIMPORTANT: Analyze the image(s) provided and answer the user's question based on what you see in the image(s). "
+                       "Describe the contents, objects, text, colors, composition, or any other relevant details. "
+                       "Be specific and detailed in your analysis.\n")
     else:
         parts.append("Answer succinctly. If you do not have supporting context, explicitly say you do not know.\n")
     

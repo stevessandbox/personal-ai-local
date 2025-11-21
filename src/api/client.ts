@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { CancelTokenSource } from 'axios';
 import type { AskRequest, AskResponse, MemoryAddRequest, MemoryListResponse, PersonalitiesResponse } from '../types';
 
 const api = axios.create({
@@ -8,9 +8,35 @@ const api = axios.create({
   },
 });
 
-export const askQuestion = async (data: AskRequest): Promise<AskResponse> => {
-  const response = await api.post<AskResponse>('/ask', data);
-  return response.data;
+// Store cancel token source for the current ask request
+let currentAskCancelToken: CancelTokenSource | null = null;
+
+export const askQuestion = async (data: AskRequest, cancelToken?: CancelTokenSource): Promise<AskResponse> => {
+  // If a cancel token is provided, use it; otherwise create a new one
+  const tokenSource = cancelToken || axios.CancelToken.source();
+  currentAskCancelToken = tokenSource;
+  
+  try {
+    const response = await api.post<AskResponse>('/ask', data, {
+      cancelToken: tokenSource.token
+    });
+    currentAskCancelToken = null;
+    return response.data;
+  } catch (error) {
+    if (axios.isCancel(error)) {
+      currentAskCancelToken = null;
+      throw new Error('Request cancelled');
+    }
+    currentAskCancelToken = null;
+    throw error;
+  }
+};
+
+export const cancelAskRequest = () => {
+  if (currentAskCancelToken) {
+    currentAskCancelToken.cancel('Request cancelled by user');
+    currentAskCancelToken = null;
+  }
 };
 
 export const addMemory = async (data: MemoryAddRequest): Promise<{ status: string }> => {
@@ -35,6 +61,31 @@ export const debugPrompt = async (data: AskRequest): Promise<{ prompt: string; m
 
 export const listPersonalities = async (): Promise<PersonalitiesResponse> => {
   const response = await api.get<PersonalitiesResponse>('/personalities');
+  return response.data;
+};
+
+export interface ChatMessage {
+  id: string;
+  timestamp: string;
+  display_timestamp: string;
+  question: string;
+  answer: string;
+  images?: string[];
+  files?: string[];
+  personality?: string;
+  used_memory: boolean;
+  used_search: boolean;
+  status?: 'pending' | 'sent' | 'error';
+  is_local?: boolean;
+}
+
+export interface ChatHistoryResponse {
+  interactions: ChatMessage[];
+  total: number;
+}
+
+export const getChatHistory = async (limit: number = 100): Promise<ChatHistoryResponse> => {
+  const response = await api.get<ChatHistoryResponse>(`/chat/history?limit=${limit}`);
   return response.data;
 };
 

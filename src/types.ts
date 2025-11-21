@@ -1,9 +1,16 @@
+export interface FileData {
+  name: string;
+  content: string;  // Base64-encoded file content
+  type: string;     // MIME type (e.g., "text/plain", "application/pdf")
+}
+
 export interface AskRequest {
   question: string;
   use_memory?: boolean;
   use_search?: boolean;
   personality?: string;
   images?: string[];  // Optional list of base64-encoded images (with data URL prefix)
+  files?: FileData[];  // Optional list of uploaded files
 }
 
 export interface TavilyInfo {

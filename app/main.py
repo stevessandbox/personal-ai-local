@@ -27,6 +27,7 @@ from .model_client import run_local_model
 from .memory import upsert_memory, query_memory, list_all_memories, delete_memory
 from .search import fetch_best_text, tavily_search
 from .prompts import build_prompt
+from .file_parser import parse_file
 
 # Simple in-memory cache for query results (efficiency improvement)
 # Cache size limited to prevent memory issues
@@ -51,10 +52,21 @@ if os.path.isdir(static_dir):
 IMAGE_STORAGE_DIR = os.getenv("IMAGE_STORAGE_DIR", "./image_store")
 os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
 
-# Serve stored images
+# File storage directory (for storing uploaded documents with timestamps)
+FILE_STORAGE_DIR = os.getenv("FILE_STORAGE_DIR", "./file_store")
+os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
+
+# Serve stored images and files
 app.mount("/images", StaticFiles(directory=IMAGE_STORAGE_DIR), name="images")
+app.mount("/files", StaticFiles(directory=FILE_STORAGE_DIR), name="files")
 
 # Request/Response models
+class FileData(BaseModel):
+    """File data model for uploaded files."""
+    name: str
+    content: str  # Base64-encoded file content
+    type: str     # MIME type
+
 class AskRequest(BaseModel):
     """Request model for asking questions."""
     question: str
@@ -62,6 +74,7 @@ class AskRequest(BaseModel):
     use_search: Optional[bool] = True   # Whether to use web search
     personality: Optional[str] = None  # Optional personality description (e.g., "goth", "friendly")
     images: Optional[List[str]] = None  # Optional list of base64-encoded images (with data URL prefix)
+    files: Optional[List[FileData]] = None  # Optional list of uploaded files
 
 class MemoryAddRequest(BaseModel):
     """Request model for adding memories."""
@@ -160,10 +173,15 @@ def ask(req: AskRequest):
             # Then add semantically similar memories
             
             # Step 1: Get the most recent interactions directly (by timestamp)
+            # Cache the full memory list to avoid repeated calls
             all_memories = list_all_memories()
             ids = all_memories.get("ids", [])
             documents = all_memories.get("documents", [])
             metadatas = all_memories.get("metadatas", [])
+            
+            # Early return if no memories
+            if not metadatas or len(metadatas) == 0:
+                return []
             
             # Filter and sort interactions by timestamp (newest first)
             recent_interactions = []
@@ -190,16 +208,17 @@ def ask(req: AskRequest):
             else:
                 logging.warning("No interactions found in memory store")
             
-            # Get the 2 most recent interaction texts (for context continuity)
-            recent_docs = [x["doc"] for x in recent_interactions[:2]]
+            # Get the 5 most recent interaction texts (for strong context continuity)
+            # Always prioritize recent interactions to maintain conversation flow
+            recent_docs = [x["doc"] for x in recent_interactions[:5]]
             recent_docs_set = set(recent_docs)  # For deduplication
             
             # Step 2: Also do semantic search for similar memories
-            # Increased n_results to 15 to better find older interactions (50+ interactions ago)
+            # Increased n_results to 20 to better find older interactions (50+ interactions ago)
             semantic_results = []
             semantic_with_distances = []  # Store with similarity scores
             try:
-                res = query_memory(req.question, n_results=15)  # Increased from 5 to 15 for better coverage
+                res = query_memory(req.question, n_results=20)  # Increased from 15 to 20 for better coverage
                 docs = res.get("documents", [])
                 metadatas_sem = res.get("metadatas", [])
                 distances = res.get("distances", [])
@@ -225,14 +244,15 @@ def ask(req: AskRequest):
             except Exception as e:
                 logging.warning(f"Semantic memory query failed: {e}")
             
-            # Step 3: Combine: recent interactions first (up to 2), then best semantic matches (up to 5 total)
-            # Increased total from 3 to 5 to include more context, including older interactions
-            result = list(recent_docs)  # Start with recent interactions (up to 2)
+            # Step 3: Combine: recent interactions first (up to 5), then best semantic matches (up to 10 total)
+            # Increased total from 5 to 10 to include more context for stronger continuity
+            result = list(recent_docs)  # Start with recent interactions (up to 5)
             
-            # Add semantically similar memories (up to 5 total)
+            # Add semantically similar memories (up to 10 total)
             # This ensures we can find interactions from 50+ interactions ago if they're semantically relevant
+            # while still maintaining strong recent context
             for sem_doc in semantic_results:
-                if len(result) >= 5:  # Increased from 3 to 5
+                if len(result) >= 10:  # Increased from 5 to 10
                     break
                 if sem_doc and sem_doc.strip():
                     result.append(sem_doc)
@@ -323,22 +343,77 @@ def ask(req: AskRequest):
         timings.update(search_timings)
         timings["search_total"] = time.time() - t_search_start
 
+    # Process uploaded files: save to disk and extract text content
+    file_contents = []
+    stored_file_paths = []
+    if req.files and len(req.files) > 0:
+        try:
+            import base64
+            from datetime import datetime
+            file_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            for i, file_data in enumerate(req.files):
+                try:
+                    # Decode base64 file content
+                    file_bytes = base64.b64decode(file_data["content"])
+                    
+                    # Determine file extension from name or type
+                    filename = file_data.get("name", f"file_{i+1}")
+                    ext = os.path.splitext(filename)[1] or ".txt"
+                    if not ext.startswith('.'):
+                        ext = '.' + ext
+                    
+                    # Create filename with timestamp
+                    safe_filename = f"{file_timestamp}_{i+1}_{filename.replace(' ', '_').replace('/', '_')}"
+                    filepath = os.path.join(FILE_STORAGE_DIR, safe_filename)
+                    
+                    # Save file to disk
+                    with open(filepath, 'wb') as f:
+                        f.write(file_bytes)
+                    
+                    # Parse file and extract text content
+                    text_content, error = parse_file(filepath)
+                    if text_content:
+                        file_contents.append(text_content)
+                        stored_file_paths.append(f"/files/{safe_filename}")
+                        logging.info(f"Stored and parsed file: {safe_filename} ({len(file_bytes)} bytes, {len(text_content)} chars extracted)")
+                    else:
+                        logging.warning(f"Failed to parse file {filename}: {error}")
+                        stored_file_paths.append(f"/files/{safe_filename}")  # Still store path even if parsing failed
+                except Exception as e:
+                    logging.warning(f"Failed to process file {i+1}: {e}")
+        except Exception as e:
+            logging.warning(f"Failed to process files: {e}")
+    
     # Build prompt with context from memory and/or search, and personality
     t_prompt_start = time.time()
-    # Debug: Log what memory texts we're including
-    if memory_texts:
-        logging.info(f"Building prompt with {len(memory_texts)} memory texts")
+    # Debug: Log what memory texts we're including (only in debug mode to reduce logging overhead)
+    if memory_texts and logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f"Building prompt with {len(memory_texts)} memory texts")
         for i, mem in enumerate(memory_texts):
-            logging.info(f"  Memory {i+1}: {mem[:150]}...")
+            logging.debug(f"  Memory {i+1}: {mem[:150]}...")
     
     # Check if images are provided for prompt customization
     has_images = req.images is not None and len(req.images) > 0
-    if has_images:
-        logging.info(f"Building prompt with image analysis instructions for {len(req.images)} image(s)")
+    if has_images and logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f"Building prompt with image analysis instructions for {len(req.images)} image(s)")
     
-    prompt = build_prompt(req.question, memory_texts=memory_texts or None,
-                          search_texts=search_texts or None, personality=req.personality,
-                          has_images=has_images)
+    if file_contents and logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f"Building prompt with {len(file_contents)} file(s) content")
+    
+    # Ensure personality is passed even when images are present
+    prompt = build_prompt(
+        req.question, 
+        memory_texts=memory_texts or None,
+        search_texts=search_texts or None, 
+        personality=req.personality,  # Explicitly pass personality
+        has_images=has_images, 
+        file_contents=file_contents if file_contents else None
+    )
+    
+    # Log personality usage for debugging
+    if req.personality and req.personality.strip():
+        logging.info(f"Using personality: {req.personality.strip()}")
     timings["prompt_build"] = time.time() - t_prompt_start
     
     # Run model inference via Ollama (with image support if images provided)
@@ -430,6 +505,11 @@ def ask(req: AskRequest):
             metadata["image_count"] = str(len(stored_image_paths))
             metadata["images"] = ",".join(stored_image_paths)  # Comma-separated list of image paths
         
+        # Add file paths if files were stored
+        if stored_file_paths:
+            metadata["file_count"] = str(len(stored_file_paths))
+            metadata["files"] = ",".join(stored_file_paths)  # Comma-separated list of file paths
+        
         upsert_memory(
             interaction_id,
             interaction_text,
@@ -506,6 +586,76 @@ def list_interactions(limit: int = 10):
         return {"interactions": interactions[:limit], "total": len(interactions)}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/chat/history")
+def get_chat_history(limit: int = 100):
+    """
+    Get chat history with all interactions formatted for display.
+    Returns interactions sorted by timestamp (oldest first for chat view).
+    """
+    try:
+        all_memories = list_all_memories()
+        ids = all_memories.get("ids", [])
+        documents = all_memories.get("documents", [])
+        metadatas = all_memories.get("metadatas", [])
+        
+        # Filter for interactions only
+        interactions = []
+        for i, meta in enumerate(metadatas):
+            if meta and meta.get("type") == "interaction":
+                doc = documents[i] if i < len(documents) else ""
+                # Parse Q: and A: from document
+                question = ""
+                answer = ""
+                if doc:
+                    if "Q: " in doc and "A: " in doc:
+                        parts = doc.split("A: ", 1)
+                        question = parts[0].replace("Q: ", "").strip()
+                        answer = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        # Fallback: use metadata
+                        question = meta.get("question", "")
+                        answer = meta.get("answer", "")
+                
+                # Extract image and file paths
+                image_paths = []
+                file_paths = []
+                if meta.get("images"):
+                    image_paths = [img.strip() for img in meta.get("images", "").split(",") if img.strip()]
+                if meta.get("files"):
+                    file_paths = [f.strip() for f in meta.get("files", "").split(",") if f.strip()]
+                
+                # Format timestamp for display
+                timestamp_str = meta.get("timestamp", "")
+                display_timestamp = ""
+                if timestamp_str:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                        display_timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except:
+                        display_timestamp = timestamp_str
+                
+                interactions.append({
+                    "id": ids[i] if i < len(ids) else None,
+                    "timestamp": timestamp_str,
+                    "display_timestamp": display_timestamp,
+                    "question": question or meta.get("question", ""),
+                    "answer": answer or meta.get("answer", ""),
+                    "images": image_paths,
+                    "files": file_paths,
+                    "personality": meta.get("personality"),
+                    "used_memory": meta.get("used_memory") == "true",
+                    "used_search": meta.get("used_search") == "true"
+                })
+        
+        # Sort by timestamp (oldest first for chat view - chronological order)
+        interactions.sort(key=lambda x: x.get("timestamp", ""))
+        logging.info(f"Chat history: Found {len(interactions)} interactions, returning last {min(limit, len(interactions))}")
+        return {"interactions": interactions[-limit:], "total": len(interactions)}
+    except Exception as e:
+        logging.error(f"Error fetching chat history: {e}", exc_info=True)
+        return {"error": str(e), "interactions": []}
 
 @app.post("/memory/delete")
 def memory_delete(req: dict):

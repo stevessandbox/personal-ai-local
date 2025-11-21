@@ -12,6 +12,7 @@ export default defineConfig({
     proxy: {
       '/ask': 'http://127.0.0.1:8000',
       '/memory': 'http://127.0.0.1:8000',
+      '/chat': 'http://127.0.0.1:8000',
       '/debug-prompt': 'http://127.0.0.1:8000',
       '/personalities': 'http://127.0.0.1:8000',
     },
